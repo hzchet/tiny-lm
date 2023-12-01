@@ -1,0 +1,4 @@
+sentencepiece
+requests
+wandb
+tqdm
