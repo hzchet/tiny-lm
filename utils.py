@@ -5,6 +5,7 @@ from itertools import repeat
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 
@@ -70,3 +71,22 @@ class LMCrossEntropyLoss(nn.Module):
         tokens: torch.Tensor (B, Len)
         """
         return self.ce(logits[:, :-1].transpose(1, 2), tokens[:, 1:])
+
+
+def generate(model, tokenizer, batch_size: int, prefix=None, max_len: int = 100, device='cpu'):
+    if prefix is None:
+        prefix = torch.tensor([[tokenizer.bos_id()] for _ in range(batch_size)]).to(device)
+    else:
+        prefix = torch.tensor([tokenizer.encode(prefix) for _ in range(batch_size)]).to(device)
+    
+    output = prefix.clone()
+    
+    for _ in range(max_len):
+        logits = model(output, None)
+        
+        next_token_probs = F.softmax(logits[:, -1, :], dim=-1)
+        next_token = torch.multinomial(next_token_probs, 1)
+
+        output = torch.cat((output, next_token), dim=1)
+        
+    return tokenizer.decode(output.tolist())

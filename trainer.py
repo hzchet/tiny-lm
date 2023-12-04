@@ -1,9 +1,11 @@
+import os
+
 import wandb
 import torch
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 
-from utils import inf_loop
+from utils import inf_loop, generate
 
 
 class Trainer:
@@ -21,6 +23,8 @@ class Trainer:
         grad_norm_clip = None,
         wandb_project: str = 'tiny-lm',
         wandb_run: str = 'one_batch_test',
+        save_dir: str = 'saved',
+        save_every: int = 5,
         **kwargs
     ):
         assert 'train' in data_loaders and 'valid' in data_loaders
@@ -30,7 +34,7 @@ class Trainer:
         
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
-        self.criterion = criterion
+        self.criterion = criterion.to(device)
         
         self.train_loader = data_loaders['train']
         self.valid_loader = data_loaders['valid']
@@ -49,6 +53,10 @@ class Trainer:
         else:
             self.train_loader = inf_loop(self.train_loader)
             self.len_epoch = len_epoch 
+        
+        os.makedirs(save_dir, exist_ok=True)
+        self.save_dir = save_dir
+        self.save_every = save_every
         
     def setup_logger(self, project_name, run_name):
         wandb.login()
@@ -84,13 +92,14 @@ class Trainer:
             self.grad_norms += [self.get_grad_norm()]
             
             if batch_idx % self.log_step == 0:
-                step = epoch * self.len_epoch
+                step = epoch * self.len_epoch + batch_idx
                 mean_loss = sum(self.train_losses) / len(self.train_losses)
                 mean_grad_norm = sum(self.grad_norms) / len(self.grad_norms)
                 
                 self.logger.log({"train_loss": mean_loss}, step=step)
                 self.logger.log({"learning_rate": self.lr_scheduler.get_last_lr()[0]}, step=step)
                 self.logger.log({"grad_norm": mean_grad_norm}, step=step)
+                self.log_generation(step)
                 
                 self.train_losses.clear()
                 self.grad_norms.clear()
@@ -104,22 +113,44 @@ class Trainer:
             input_ids = batch['input_ids'].to(self.device)
             padding_mask = batch['padding_mask'].to(self.device)
             
-            logits = self.model(input_ids, padding_mask)
-            
-            loss = self.criterion(logits, input_ids)
+            with torch.inference_mode():
+                logits = self.model(input_ids, padding_mask)
+                loss = self.criterion(logits, input_ids)
             
             self.valid_losses += [loss.detach().cpu().numpy()]
             
-        step = epoch * self.len_epoch
+        step = (epoch + 1) * self.len_epoch
         mean_loss = sum(self.valid_losses) / len(self.valid_losses)
-        # print(f'Losses: {self.valid_losses}')
         self.logger.log({"valid_loss": mean_loss}, step=step)
         self.valid_losses.clear()
-
+    
+    def log_generation(self, step):
+        self.model.eval()
+        prefix = 'Once upon a time'
+        texts = generate(
+            self.model,
+            self.valid_loader.dataset.tokenizer,
+            batch_size=5,
+            prefix=prefix,
+            max_len=100,
+            device=self.device
+        )
+        
+        self.logger.log({
+            "story": self.logger.Html('\n***\n'.join(texts))
+        }, step=step)
+    
     def train(self):
-        for epoch in range(self.n_epochs):
-            self.train_epoch(epoch)
-            self.eval_epoch(epoch)
+        try:
+            for epoch in range(self.n_epochs):
+                self.train_epoch(epoch)
+                self.eval_epoch(epoch)
+                if epoch % self.save_every == 0:
+                    self.save_checkpoint(epoch)
+        except KeyboardInterrupt as e:
+            print('Saving model on keyboard interrupt...')
+            self.save_checkpoint(epoch)
+            raise e
 
     @torch.no_grad()
     def get_grad_norm(self, norm_type=2):
@@ -131,3 +162,22 @@ class Trainer:
         total_norm = torch.norm(torch.stack(params_norms), norm_type)
         
         return total_norm.detach().cpu().numpy()
+
+    def save_checkpoint(self, epoch):
+        state = {
+            "epoch": epoch,
+            "state_dict": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "lr_scheduler": self.lr_scheduler.state_dict(),
+        }
+        filename = os.path.join(self.save_dir, f'checkpoint-epoch{epoch}.pth')
+        print('Saving checkpoint...')
+        torch.save(state, filename)
+
+    def resume_from_checkpoint(self, ckpt_path, resume_only_model: bool = False):
+        state = torch.load(ckpt_path)
+        self.model.load_state_dict(state['state_dict'])
+        if not resume_only_model:
+            self.optimizer.load_state_dict(state['optimizer'])
+            self.lr_scheduler.load_state_dict(state['lr_scheduler'])
+        print('State loaded from checkpoint.')

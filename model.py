@@ -51,16 +51,19 @@ class LanguageModel(nn.Module):
             n_heads, 
             dim_feedforward,
             dropout,
-            batch_first=True
+            batch_first=True,
+            norm_first=True
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_encoder_layers)
         self.head = nn.Linear(embedding_dim, num_embeddings)
+
+        self.init_weights()
     
     def init_weights(self) -> None:
         initrange = 0.1
         self.embedding.weight.data.uniform_(-initrange, initrange)
-        self.linear.bias.data.zero_()
-        self.linear.weight.data.uniform_(-initrange, initrange)
+        self.head.bias.data.zero_()
+        self.head.weight.data.uniform_(-initrange, initrange)
     
     def forward(self, input_ids, padding_mask):
         """
@@ -71,6 +74,6 @@ class LanguageModel(nn.Module):
         x = self.embedding(input_ids)
         x = self.pos_encoder(x)
         causal_mask = nn.Transformer.generate_square_subsequent_mask(x.shape[1]).to(x.device)
-        output = self.encoder(x, causal_mask, padding_mask, is_causal=True)
+        output = self.encoder(x, causal_mask, is_causal=True)
         logits = self.head(output)
         return logits

@@ -2,6 +2,7 @@ from dataclasses import dataclass, asdict
 
 import torch
 from torch.utils.data import DataLoader
+import numpy as np
 
 from tiny_stories_dataset import TinyStories
 from model import LanguageModel
@@ -9,38 +10,49 @@ from utils import LMCrossEntropyLoss, collate_fn
 from trainer import Trainer
 
 
+SEED = 123
+torch.manual_seed(SEED)
+torch.backends.cudnn.deterministic = False
+torch.backends.cudnn.benchmark = True
+np.random.seed(SEED)
+
+
 @dataclass
 class Config:
     root_path: str = 'data'
-    max_len: int = 64
+    max_len: int = 256
     limit: int = None
     vocab_size: int = 4000
     
-    batch_size: int = 32
+    batch_size: int = 224
     
-    embedding_dim: int = 32
+    embedding_dim: int = 512
     num_embeddings: int = 4000
-    num_encoder_layers: int = 1
-    n_heads: int = 4
-    dim_feedforward: int = 64
+    num_encoder_layers: int = 8
+    n_heads: int = 8
+    dim_feedforward: int = 256
     
     lr: float = 3e-4
     
     grad_norm_clip = 1.0
     n_epochs: int = 100
-    len_epoch: int = 100
+    len_epoch: int = 300
     log_step: int = 50
     wandb_project: str = 'tiny-lm'
-    wandb_run: str = 'one_batch_test'
-    
+    wandb_run: str = 'hidden512-ff512-layers8-heads8'
+    save_dir: str = 'saved/hidden512-ff512-layers8-heads8-2'
+    save_every: int = 5
+    ckpt_path: str = 'saved/hidden512-ff512-layers8-heads8/checkpoint-epoch30.pth'
 
-def one_batch_test():
-    cfg = Config(limit=10, batch_size=10)
+def run():
+    cfg = Config()
     
-    dataset = TinyStories(cfg.root_path, 'train', cfg.max_len, cfg.limit)
-    train_loader = DataLoader(dataset, batch_size=cfg.batch_size, pin_memory=True, 
+    train_dataset = TinyStories(cfg.root_path, 'train', cfg.max_len, cfg.limit)
+    train_loader = DataLoader(train_dataset, batch_size=cfg.batch_size, pin_memory=True, 
                               collate_fn=collate_fn, shuffle=True)
-    valid_loader = DataLoader(dataset, batch_size=cfg.batch_size, pin_memory=True, 
+    
+    valid_dataset = TinyStories(cfg.root_path, 'test', cfg.max_len, cfg.limit)
+    valid_loader = DataLoader(valid_dataset, batch_size=cfg.batch_size, pin_memory=True, 
                               collate_fn=collate_fn, shuffle=False)
     data_loaders = {"train": train_loader, "valid": valid_loader}
     
@@ -66,8 +78,9 @@ def one_batch_test():
         device='cuda:0', 
         **asdict(cfg)
     )
+    trainer.resume_from_checkpoint(cfg.ckpt_path, resume_only_model=True)
     trainer.train()
 
 
 if __name__ == '__main__':
-    one_batch_test()
+    run()
